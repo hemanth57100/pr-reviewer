@@ -1,0 +1,24 @@
+# Generated review reports: they quote internal code and findings, keep them out of the repo
+review-*.md
+
+# Local diffs made with --diff-file (the planted-bug samples in tests/ are kept)
+*.diff
+*.patch
+!tests/*.diff
+
+# Secrets
+.env
+.env.*
+*.token
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# macOS / editors
+.DS_Store
+.vscode/
+.idea/
+*.swp

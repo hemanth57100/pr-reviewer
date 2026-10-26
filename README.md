@@ -34,10 +34,15 @@ python3 review_pr.py https://github.com/<owner>/<repo>/pull/42        # GitHub
 The server type is detected from the link: Gitea links use `/pulls/`, GitHub links use `/pull/`
 (GitHub Enterprise hosts work too). If detection is ever wrong, add `--platform gitea` or `--platform github`.
 
-The report prints in the terminal and is also saved as `review-<owner>-<repo>-pr42.md`.
+A text summary prints in the terminal, and an HTML report is saved as `review-<owner>-<repo>-pr42.html`
+and opened in your browser. The HTML report has severity counts, a merge verdict, filters, a search box
+and the code around each finding with the flagged line highlighted. It works offline and follows the
+system light/dark theme. Reports are git-ignored because they quote internal code.
 
 | Option | What it does |
 |---|---|
+| `--no-open` | Save the HTML report without opening the browser |
+| `--out report.md` | Save the plain-text report instead (`.md` or `.txt`); `--out x.html` picks the HTML file name |
 | `--insecure` | Use if the server has an internal/self-signed SSL certificate |
 | `--dry-run` | List files that would be reviewed/skipped, without running the model |
 | `--min-confidence low` | Show more findings (more false positives); default is `medium` |

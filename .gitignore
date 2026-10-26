@@ -1,5 +1,8 @@
 # Generated review reports: they quote internal code and findings, keep them out of the repo
+review-*.html
 review-*.md
+review-*.txt
+reports/
 
 # Local diffs made with --diff-file (the planted-bug samples in tests/ are kept)
 *.diff

@@ -14,6 +14,8 @@ Usage:
     python3 review_pr.py --diff-file my.diff        # review a local diff instead
 """
 import argparse
+import datetime
+import html
 import json
 import os
 import re
@@ -22,6 +24,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import webbrowser
 from fnmatch import fnmatch
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
@@ -284,6 +287,7 @@ def fetch_pr(url, insecure, platform="auto"):
         "body": info.get("body") or "",
         "repo": "{}/{}".format(owner, repo),
         "number": number,
+        "url": url.strip(),
         "author": (info.get("user") or {}).get("login", ""),
         "head": (info.get("head") or {}).get("ref", ""),
         "base": (info.get("base") or {}).get("ref", ""),
@@ -364,6 +368,21 @@ def annotate_hunks(file_diff):
     return ["\n".join(h) for h in hunks]
 
 
+def snippet_for(chunk, line, radius=3):
+    """Lines around `line` from an annotated chunk, as [(number or "", kind, text)]."""
+    rows = []
+    for raw in chunk.splitlines():
+        m = re.match(r"^\s*(\d+) ([+ ]) (.*)$", raw)
+        if m:
+            rows.append((int(m.group(1)), m.group(2), m.group(3)))
+        elif raw.startswith("       - "):
+            rows.append(("", "-", raw[9:]))
+    idx = next((i for i, r in enumerate(rows) if r[0] == line), None)
+    if idx is None:
+        return []
+    return rows[max(0, idx - radius): idx + radius + 1]
+
+
 def chunk_hunks(hunks, max_chars):
     """Group hunks into chunks that fit in the model's context."""
     chunks, cur = [], ""
@@ -438,6 +457,16 @@ def review_chunk(model, pr, path, lang, chunk, part, parts, num_ctx, timeout):
 
 # ---------------------------------------------------------------- Report
 
+def verdict_for(counts):
+    if counts["critical"]:
+        return "block", "Do not merge until the Critical issues are fixed."
+    if counts["high"]:
+        return "warn", "Fix or justify the High issues before merging."
+    if counts["medium"]:
+        return "ok", "OK to merge after considering the Medium issues."
+    return "ok", "No significant risks found."
+
+
 def build_report(pr, findings, reviewed, skipped, failed, model, elapsed):
     out = []
     head = "PR #{} — {}".format(pr["number"], pr["title"]) if pr.get("number") else "Diff review — {}".format(pr["title"])
@@ -459,15 +488,8 @@ def build_report(pr, findings, reviewed, skipped, failed, model, elapsed):
     out.append("## Summary")
     out.append("  🔴 Critical: {}   🟠 High: {}   🟡 Medium: {}".format(
         counts["critical"], counts["high"], counts["medium"]))
-    if counts["critical"]:
-        verdict = "❌ Do not merge until the Critical issues are fixed."
-    elif counts["high"]:
-        verdict = "⚠️  Fix or justify the High issues before merging."
-    elif counts["medium"]:
-        verdict = "✅ OK to merge after considering the Medium issues."
-    else:
-        verdict = "✅ No significant risks found."
-    out.append("  Verdict: " + verdict)
+    level, verdict = verdict_for(counts)
+    out.append("  Verdict: " + {"block": "❌ ", "warn": "⚠️  "}.get(level, "✅ ") + verdict)
     if failed:
         out.append("  ⚠️  Model failed on {} file(s): {}".format(len(failed), ", ".join(failed)))
     out.append("")
@@ -495,6 +517,170 @@ def build_report(pr, findings, reviewed, skipped, failed, model, elapsed):
     return "\n".join(out)
 
 
+HTML_CSS = """
+:root{--bg:#f6f7f9;--card:#fff;--text:#1c2128;--muted:#5b6470;--border:#dde1e6;--code:#f3f4f6;
+--crit:#c62828;--crit-bg:#fdecec;--high:#c25a00;--high-bg:#fff1e3;--med:#8a6d00;--med-bg:#fff8d6;
+--ok:#1a7f37;--ok-bg:#e6f4ea;--add:#e6f4ea;--del:#fdecec;--hl:#fff3b0;--accent:#2f6feb}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1216;--card:#171b21;--text:#e6e8eb;--muted:#9aa4b0;
+--border:#2b313a;--code:#11151a;--crit:#ff7b72;--crit-bg:#3a1517;--high:#ffa657;--high-bg:#3a2410;
+--med:#e3b341;--med-bg:#332a0d;--ok:#56d364;--ok-bg:#12301b;--add:#12301b;--del:#3a1517;--hl:#4a3f0f;--accent:#58a6ff}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:1000px;margin:0 auto;padding:28px 16px 48px}
+h1{font-size:22px;margin:0 0 6px;line-height:1.3}
+.meta{color:var(--muted);font-size:13px;display:flex;flex-wrap:wrap;gap:4px 14px}
+.meta a{color:var(--accent)}
+.verdict{margin:20px 0;padding:14px 18px;border-radius:10px;font-weight:600;border:1px solid}
+.verdict.block{background:var(--crit-bg);color:var(--crit);border-color:var(--crit)}
+.verdict.warn{background:var(--high-bg);color:var(--high);border-color:var(--high)}
+.verdict.ok{background:var(--ok-bg);color:var(--ok);border-color:var(--ok)}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.stat{background:var(--card);border:1px solid var(--border);border-left:5px solid;border-radius:10px;padding:12px 16px;
+cursor:pointer;text-align:left;color:var(--text);font:inherit}
+.stat:hover,.stat.active{outline:2px solid var(--accent)}
+.stat .n{font-size:28px;font-weight:700;line-height:1.1}
+.stat .l{color:var(--muted);font-size:13px;text-transform:uppercase;letter-spacing:.04em}
+.stat.critical{border-left-color:var(--crit)}.stat.critical .n{color:var(--crit)}
+.stat.high{border-left-color:var(--high)}.stat.high .n{color:var(--high)}
+.stat.medium{border-left-color:var(--med)}.stat.medium .n{color:var(--med)}
+.toolbar{display:flex;gap:8px;margin:22px 0 12px;flex-wrap:wrap;align-items:center}
+.chip{border:1px solid var(--border);background:var(--card);color:var(--text);border-radius:999px;padding:5px 14px;cursor:pointer;font:inherit;font-size:13px}
+.chip.active{background:var(--accent);border-color:var(--accent);color:#fff}
+.search{flex:1;min-width:180px;padding:7px 12px;border:1px solid var(--border);border-radius:8px;background:var(--card);color:var(--text);font:inherit;font-size:14px}
+.finding{background:var(--card);border:1px solid var(--border);border-radius:10px;margin:0 0 12px;overflow:hidden}
+.fhead{display:flex;gap:10px;align-items:flex-start;padding:14px 16px 6px}
+.badge{flex:none;font-size:11px;font-weight:700;letter-spacing:.05em;padding:3px 8px;border-radius:6px;text-transform:uppercase;margin-top:2px}
+.badge.critical{background:var(--crit-bg);color:var(--crit)}.badge.high{background:var(--high-bg);color:var(--high)}.badge.medium{background:var(--med-bg);color:var(--med)}
+.ftitle{font-weight:600;font-size:16px}
+.loc{font:12.5px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted);word-break:break-all}
+.fbody{padding:0 16px 14px}
+.fbody p{margin:6px 0}
+.label{font-weight:600}
+.conf{display:inline-block;font-size:12px;color:var(--muted);border:1px solid var(--border);border-radius:999px;padding:0 8px;margin-left:6px}
+pre.code{margin:10px 0 0;background:var(--code);border:1px solid var(--border);border-radius:8px;overflow-x:auto;font:12.5px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;padding:6px 0}
+.row{display:flex;white-space:pre}
+.row .no{flex:none;width:52px;text-align:right;padding-right:10px;color:var(--muted);user-select:none}
+.row .mk{flex:none;width:16px;color:var(--muted);user-select:none}
+.row.add{background:var(--add)}.row.del{background:var(--del)}
+.row.hit{background:var(--hl);font-weight:600}
+.empty{background:var(--card);border:1px dashed var(--border);border-radius:10px;padding:28px;text-align:center;color:var(--muted)}
+details{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px 16px;margin-top:12px}
+summary{cursor:pointer;font-weight:600}
+details ul{margin:8px 0 0;padding-left:20px;font:13px ui-monospace,SFMono-Regular,Menlo,monospace}
+details li span{color:var(--muted);font-family:-apple-system,BlinkMacSystemFont,sans-serif}
+.warnbox{margin-top:10px;color:var(--high);font-size:14px}
+footer{margin-top:28px;color:var(--muted);font-size:13px;text-align:center}
+.hidden{display:none}
+.verdict .ic{margin-right:8px}
+@media (max-width:600px){.stats{gap:8px}.stat{padding:10px 12px}.stat .n{font-size:22px}.stat .l{font-size:11px}}
+@media print{.toolbar{display:none}.finding{break-inside:avoid}}
+"""
+
+HTML_JS = """
+(function(){
+  var sev='all', q='';
+  var cards=[].slice.call(document.querySelectorAll('.finding'));
+  function apply(){
+    var shown=0;
+    cards.forEach(function(c){
+      var ok=(sev==='all'||c.dataset.sev===sev)&&(!q||c.dataset.text.indexOf(q)>=0);
+      c.classList.toggle('hidden',!ok); if(ok) shown++;
+    });
+    document.querySelectorAll('.chip').forEach(function(b){b.classList.toggle('active',b.dataset.sev===sev)});
+    document.querySelectorAll('.stat').forEach(function(b){b.classList.toggle('active',b.dataset.sev===sev)});
+    var none=document.getElementById('nomatch'); if(none) none.classList.toggle('hidden',shown>0||!cards.length);
+  }
+  document.querySelectorAll('[data-sev]').forEach(function(b){
+    if(b.classList.contains('finding')) return;
+    b.addEventListener('click',function(){sev=(sev===b.dataset.sev&&b.classList.contains('stat'))?'all':b.dataset.sev;apply()});
+  });
+  var s=document.getElementById('search');
+  if(s) s.addEventListener('input',function(){q=s.value.trim().toLowerCase();apply()});
+})();
+"""
+
+
+def render_html(pr, findings, reviewed, skipped, failed, model, elapsed):
+    """Self-contained HTML report. Everything from the PR or the model is escaped."""
+    e = lambda s: html.escape(str(s), quote=True)
+    counts = {s: sum(1 for f in findings if f["severity"] == s) for s in SEVERITIES}
+    level, verdict = verdict_for(counts)
+    title = "PR #{} — {}".format(pr["number"], pr["title"]) if pr.get("number") else "Diff review — {}".format(pr["title"])
+
+    meta = []
+    if pr.get("repo"):
+        meta.append("<span>{}</span>".format(e(pr["repo"])))
+    if pr.get("head"):
+        meta.append("<span>{} → {}</span>".format(e(pr["head"]), e(pr["base"])))
+    if pr.get("author"):
+        meta.append("<span>by {}</span>".format(e(pr["author"])))
+    if pr.get("url", "").startswith(("http://", "https://")):
+        meta.append('<a href="{}" target="_blank" rel="noopener">Open PR ↗</a>'.format(e(pr["url"])))
+    meta.append("<span>{} file(s) reviewed · {} skipped · {} · {:.0f}s · {}</span>".format(
+        len(reviewed), len(skipped), e(model), elapsed, datetime.datetime.now().strftime("%Y-%m-%d %H:%M")))
+
+    stats = "".join(
+        '<button class="stat {s}" data-sev="{s}"><div class="n">{n}</div><div class="l">{l}</div></button>'.format(
+            s=s, n=counts[s], l=s.capitalize()) for s in SEVERITIES)
+
+    cards = []
+    for f in findings:
+        rows = []
+        for num, kind, text in f.get("snippet") or []:
+            cls = {"+": "add", "-": "del"}.get(kind, "")
+            if num == f["line"]:
+                cls += " hit"
+            rows.append('<div class="row {}"><span class="no">{}</span><span class="mk">{}</span><span>{}</span></div>'.format(
+                cls.strip(), num, "" if kind == " " else kind, e(text)))
+        code = '<pre class="code">{}</pre>'.format("".join(rows)) if rows else ""
+        conf = '<span class="conf">confidence: {}</span>'.format(e(f["confidence"])) if f.get("confidence") != "high" else ""
+        search_text = " ".join([f["file"], f["title"], f["explanation"]]).lower()
+        cards.append(
+            '<article class="finding" data-sev="{sev}" data-text="{st}">'
+            '<div class="fhead"><span class="badge {sev}">{sev}</span><div>'
+            '<div class="ftitle">{title}{conf}</div><div class="loc">{file}:{line}</div></div></div>'
+            '<div class="fbody"><p><span class="label">Why:</span> {why}</p>'
+            '<p><span class="label">Fix:</span> {fix}</p>{code}</div></article>'.format(
+                sev=f["severity"], st=e(search_text), title=e(f["title"]), conf=conf, file=e(f["file"]),
+                line=e(f["line"]), why=e(f["explanation"]), fix=e(f["fix"]), code=code))
+
+    if cards:
+        chips = '<button class="chip active" data-sev="all">All ({})</button>'.format(len(findings)) + "".join(
+            '<button class="chip" data-sev="{s}">{l} ({n})</button>'.format(s=s, l=s.capitalize(), n=counts[s])
+            for s in SEVERITIES if counts[s])
+        body = ('<div class="toolbar">{}<input id="search" class="search" type="search" '
+                'placeholder="Filter by file or text…"></div>{}'
+                '<div id="nomatch" class="empty hidden">No findings match this filter.</div>').format(chips, "".join(cards))
+    else:
+        body = '<div class="empty">✅ No Critical, High or Medium risks found in the reviewed files.</div>'
+
+    extra = ""
+    if failed:
+        extra += '<div class="warnbox">⚠️ The model failed on {} file(s): {}</div>'.format(
+            len(failed), e(", ".join(failed)))
+    if reviewed:
+        extra += "<details><summary>Reviewed files ({})</summary><ul>{}</ul></details>".format(
+            len(reviewed), "".join("<li>{}</li>".format(e(p)) for p in reviewed))
+    if skipped:
+        extra += "<details><summary>Skipped files ({})</summary><ul>{}</ul></details>".format(
+            len(skipped), "".join("<li>{} <span>— {}</span></li>".format(e(p), e(r)) for p, r in skipped))
+
+    return """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{title}</title><style>{css}</style></head>
+<body><div class="wrap">
+<h1>{title}</h1><div class="meta">{meta}</div>
+<div class="verdict {level}"><span class="ic">{icon}</span>{verdict}</div>
+<div class="stats">{stats}</div>
+{body}{extra}
+<footer>AI first-pass review by a local model. It can miss issues or flag false ones — always review manually.</footer>
+</div><script>{js}</script></body></html>
+""".format(title=e(title), css=HTML_CSS, meta="".join(meta), level=level,
+           icon={"block": "❌", "warn": "⚠️"}.get(level, "✅"), verdict=e(verdict),
+           stats=stats, body=body, extra=extra, js=HTML_JS)
+
+
 # ---------------------------------------------------------------- Main
 
 def main():
@@ -508,7 +694,9 @@ def main():
     ap.add_argument("--ctx", type=int, default=16384, help="model context size in tokens (default: %(default)s)")
     ap.add_argument("--min-confidence", choices=["low", "medium", "high"], default="medium",
                     help="drop findings below this confidence (default: %(default)s)")
-    ap.add_argument("--out", help="save the report to this file (default: review-<repo>-<pr>.md)")
+    ap.add_argument("--out", help="save the report to this file (default: review-<repo>-pr<N>.html; "
+                                  "a .md or .txt name saves the plain-text report instead)")
+    ap.add_argument("--no-open", action="store_true", help="do not open the HTML report in the browser")
     ap.add_argument("--insecure", action="store_true", help="skip SSL verification (internal certificates)")
     ap.add_argument("--timeout", type=int, default=600, help="seconds per model call (default: %(default)s)")
     ap.add_argument("--dry-run", action="store_true", help="show which files would be reviewed, without calling the model")
@@ -521,10 +709,10 @@ def main():
         with open(args.diff_file, encoding="utf-8", errors="replace") as fh:
             diff = fh.read()
         pr = {"title": os.path.basename(args.diff_file), "body": "", "number": None}
-        default_out = "review-{}.md".format(os.path.splitext(os.path.basename(args.diff_file))[0])
+        default_out = "review-{}.html".format(os.path.splitext(os.path.basename(args.diff_file))[0])
     else:
         pr, diff = fetch_pr(args.pr_url, args.insecure, args.platform)
-        default_out = "review-{}-pr{}.md".format(pr["repo"].replace("/", "-"), pr["number"])
+        default_out = "review-{}-pr{}.html".format(pr["repo"].replace("/", "-"), pr["number"])
 
     files = split_diff_by_file(diff)
     if not files:
@@ -580,6 +768,7 @@ def main():
                     "file": path, "severity": sev, "line": f.get("line", "?"),
                     "title": str(f.get("title", "")).strip(), "explanation": str(f.get("explanation", "")).strip(),
                     "fix": str(f.get("fix", "")).strip(), "confidence": conf,
+                    "snippet": snippet_for(chunk, f.get("line")),
                 })
                 n_found += 1
         if had_error:
@@ -587,13 +776,17 @@ def main():
         print(" {} finding(s) ({:.0f}s)".format(n_found, time.time() - t0), file=sys.stderr)
 
     findings.sort(key=lambda f: (SEVERITIES.index(f["severity"]), -CONFIDENCE_RANK[f["confidence"]], f["file"]))
-    report = build_report(pr, findings, [p for p, _, _ in plan], skipped, failed, args.model, time.time() - started)
+    reviewed, elapsed = [p for p, _, _ in plan], time.time() - started
+    report = build_report(pr, findings, reviewed, skipped, failed, args.model, elapsed)
     print("\n" + report)
 
     out_path = args.out or default_out
+    as_text = out_path.lower().endswith((".md", ".txt"))
     with open(out_path, "w", encoding="utf-8") as fh:
-        fh.write(report + "\n")
+        fh.write(report + "\n" if as_text else render_html(pr, findings, reviewed, skipped, failed, args.model, elapsed))
     print("\nSaved report to {}".format(out_path), file=sys.stderr)
+    if not as_text and not args.no_open:
+        webbrowser.open("file://" + os.path.abspath(out_path))
 
     # Exit code is useful if you ever script this: 2 = critical, 1 = high, 0 = otherwise.
     sys.exit(2 if any(f["severity"] == "critical" for f in findings)

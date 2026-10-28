@@ -1,7 +1,9 @@
-# Generated review reports: they quote internal code and findings, keep them out of the repo
+# Generated reports and PR descriptions: they quote internal code, keep them out of the repo
 review-*.html
 review-*.md
 review-*.txt
+description-*.html
+description-*.md
 reports/
 
 # Local diffs made with --diff-file (the planted-bug samples in tests/ are kept)

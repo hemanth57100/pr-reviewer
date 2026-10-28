@@ -263,20 +263,33 @@ def parse_pr_url(url, platform="auto"):
     return platform, base, owner, repo, int(number)
 
 
-def fetch_pr(url, insecure, platform="auto"):
+def pr_api(url, platform="auto"):
+    """Return (platform, display name, token, PR API url, owner, repo, number) for a PR link."""
     platform, base, owner, repo, number = parse_pr_url(url, platform)
     if platform == "github":
         name, token = "GitHub", os.environ.get("GITHUB_TOKEN")
         api_root = "https://api.github.com" if re.match(r"^https?://(www\.)?github\.com$", base) else base + "/api/v3"
-        if not token:
-            print("No GITHUB_TOKEN set: public repos only, max 60 requests/hour.", file=sys.stderr)
     else:
         name, token = "Gitea", os.environ.get("GITEA_TOKEN")
         api_root = base + "/api/v1"
         if not token:
             sys.exit("Set your Gitea token first:  export GITEA_TOKEN=xxxxxxxx")
-    print("Fetching {} PR…".format(name), file=sys.stderr)
     api = "{}/repos/{}/{}/pulls/{}".format(api_root, owner, repo, number)
+    return platform, name, token, api, owner, repo, number
+
+
+def fetch_pr_commits(url, insecure, platform="auto"):
+    """Commit messages of a PR (Gitea and GitHub return the same shape)."""
+    _, name, token, api, _, _, _ = pr_api(url, platform)
+    commits = json.loads(http_get(api + "/commits", token, insecure, platform=name))
+    return [(c.get("commit") or {}).get("message", "") for c in commits if isinstance(c, dict)]
+
+
+def fetch_pr(url, insecure, platform="auto"):
+    platform, name, token, api, owner, repo, number = pr_api(url, platform)
+    if platform == "github" and not token:
+        print("No GITHUB_TOKEN set: public repos only, max 60 requests/hour.", file=sys.stderr)
+    print("Fetching {} PR…".format(name), file=sys.stderr)
     info = json.loads(http_get(api, token, insecure, platform=name))
     if platform == "github":
         diff = http_get(api, token, insecure, accept="application/vnd.github.diff", platform=name)

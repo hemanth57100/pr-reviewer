@@ -1,7 +1,9 @@
-# Local PR Reviewer (Gitea / GitHub + Ollama)
+# Local PR Tools (Gitea / GitHub + Ollama)
 
-Paste a Gitea or GitHub PR link and get a risk report grouped as **Critical / High / Medium**.
-It runs fully on your Mac, so no code leaves the machine, and it uses only the Python standard library (no pip installs).
+Two tools that run fully on your Mac, so no code leaves the machine. They use only the Python standard library (no pip installs).
+
+- **`review_pr.py`**: paste a PR link and get a risk report grouped as **Critical / High / Medium**.
+- **`describe_pr.py`**: drafts a PR description (title, summary, changes, how to test, risks) ready to paste.
 
 ## One-time setup
 
@@ -49,6 +51,33 @@ system light/dark theme. Reports are git-ignored because they quote internal cod
 | `--model qwen2.5-coder:14b` | Use a different Ollama model |
 | `--ctx 8192` | Smaller context: faster and less memory; larger diffs get split more |
 | `--diff-file x.diff` | Review a local diff (e.g. `git diff main > x.diff`) instead of a PR |
+
+## PR description writer
+
+```bash
+python3 describe_pr.py https://<gitea-host>/<owner>/<repo>/pulls/42    # existing Gitea PR
+python3 describe_pr.py https://github.com/<owner>/<repo>/pull/42       # existing GitHub PR
+python3 describe_pr.py --base main                                    # your current branch, BEFORE opening the PR
+python3 describe_pr.py --base develop --repo ~/code/game-server       # a repo in another folder
+```
+
+It summarizes each changed file (small files are batched together), then writes one description from those
+summaries plus the commit messages and any description the author already wrote. You get:
+
+- `description-<...>.html`, opened in your browser, with a preview and **Copy title** / **Copy Markdown** buttons
+- `description-<...>.md`, the same text as a file
+
+Paste it into the PR on Gitea or GitHub and **edit it before posting**. Nothing is posted automatically.
+
+What it does to stay accurate with a small model:
+- Asks for literal "what changed" summaries and forbids made-up reasons ("for security", "fixes a leak").
+- Ticket IDs like `GAME-142` are taken from the branch name, title and commits and kept in the title.
+- Command-line options are read from the added code, and any bullet that mentions an option that is not
+  in the code (a common small-model mistake) is removed, with a note in the terminal.
+- Unity assets, lock files and binaries are not sent to the model; they are listed as counts instead.
+
+Options: `--no-open`, `--out name.html`, `--model`, `--ctx`, `--insecure`, `--platform`, `--diff-file`
+(same meaning as for `review_pr.py`). Expect about 30–90 s for a typical PR on an M1.
 
 ## Good to know (M1, 16 GB)
 
